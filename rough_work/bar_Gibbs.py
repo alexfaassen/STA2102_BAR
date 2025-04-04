@@ -32,6 +32,7 @@ class BayesianAutoregressive:
         for _ in range(iterations):
             # Update posterior variance and mean
             posterior_var_inv = np.linalg.inv(self.prior_var) + (X.T @ X) / sigma_sq
+            # Note: np.linalg.inv is slow, switch to np.linalg.solve().
             self.posterior_var = np.linalg.inv(posterior_var_inv)
             self.posterior_mean = self.posterior_var @ (np.linalg.inv(self.prior_var) @ self.prior_mean + (X.T @ y_target) / sigma_sq)
 

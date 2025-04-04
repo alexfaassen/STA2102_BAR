@@ -98,16 +98,18 @@ class BAR:
         fig, axes = plt.subplots(1, self.p + 1, figsize=(4 * (self.p + 1), 4))
 
         with pm.Model():
-            # Priors
-            phi = self.priors["phi"](shape=self.p)
-            sigma = self.priors["sigma"]()
+            phi_rv = self.priors["phi"](shape=self.p)
+            sigma_rv = self.priors["sigma"]()
 
-            # Prior sampling
+            # Rebind priors with unique names for plotting context
+            phi_temp = pm.Deterministic("phi_plot", phi_rv)
+            sigma_temp = pm.Deterministic("sigma_plot", sigma_rv)
+
             prior_samples = pm.sample_prior_predictive(samples)
 
         # Extract and plot samples
-        phi_samples = prior_samples.prior["phi"].stack(sample=("chain", "draw")).values.T
-        sigma_samples = prior_samples.prior["sigma"].stack(sample=("chain", "draw")).values
+        phi_samples = prior_samples.prior["phi_plot"].stack(sample=("chain", "draw")).values.T
+        sigma_samples = prior_samples.prior["sigma_plot"].stack(sample=("chain", "draw")).values
 
         for i in range(self.p):
             axes[i].hist(phi_samples[:, i], bins=30, color="skyblue", edgecolor="gray", alpha=0.8)
@@ -157,7 +159,7 @@ class BAR:
             phi = self.priors["phi"](shape=self.p) # p priors
             sigma = self.priors["sigma"]()
 
-            # BAR mean function - e.g. phi0 + phi1 * y[t-1] + ...
+            # Linear mean function - e.g. phi0 + phi1 * y[t-1] + ...
             mu = pm.math.dot(X, phi)
 
             # Likelihood
@@ -202,7 +204,7 @@ class BAR:
     ## Forecasting
     def forecast(self, steps=10, credible_interval=0.9):
         """
-        Forecast future value distributions from the model using posterior samples.
+        Forecast future values from the model.
 
         Parameters
         ----------
@@ -225,23 +227,23 @@ class BAR:
         if self.trace is None:
             raise RuntimeError("Fit the model before forecasting.")
 
-        # Extract samples
-        phi_samples = self.trace.posterior["phi"].stack(draws=("chain", "draw")).values.T  # (samples, p)
-        sigma_samples = self.trace.posterior["sigma"].stack(draws=("chain", "draw")).values.flatten()  # (samples,)
-        n_samples = phi_samples.shape[0]
+        y_pred = np.asarray(self.y_fit).copy()
+        forecasts = []
 
-        # Initialize
-        y_pred = list(self.y_fit[-self.p:])  # most recent p values
-        forecasts = np.zeros((n_samples, steps))
+        for _ in range(steps):
+            X_new = y_pred[-self.p:][::-1]
+            samples = []
+            for phi_sample, sigma_sample in zip(
+                self.trace.posterior['phi'].stack(draws=("chain", "draw")).values.T,
+                self.trace.posterior['sigma'].stack(draws=("chain", "draw")).values.flatten()
+            ):
+                mu = np.dot(X_new, phi_sample)
+                samples.append(np.random.normal(mu, sigma_sample))
+            forecast_dist = np.array(samples)
+            y_pred = np.append(y_pred, np.mean(forecast_dist))
+            forecasts.append(forecast_dist)
 
-        # Iterate
-        for t in range(steps):
-            X_t = np.array(y_pred[-self.p:][::-1])  # lagged features
-            mu_t = phi_samples @ X_t  # BAR mean
-            y_t = np.random.normal(mu_t, sigma_samples)  # likelihood
-            forecasts[:, t] = y_t
-            y_pred.append(y_t.mean())  # append the mean of this step’s forecast for next lag
-
+        forecasts = np.array(forecasts).T
         forecast_mean = forecasts.mean(axis=0)
         lower = np.percentile(forecasts, (1 - credible_interval) / 2 * 100, axis=0)
         upper = np.percentile(forecasts, (1 + credible_interval) / 2 * 100, axis=0)

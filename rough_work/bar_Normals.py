@@ -64,18 +64,6 @@ class BAR:
         if self.trace is None:
             raise RuntimeError("Model must be fit before plotting.")
         return az.plot_trace(self.trace)
-
-    def sample_posterior_predictive(self, y):
-        """
-        Generate posterior predictive samples based on observed input.
-
-        Parameters:
-        - y (array-like): The observed series used in fitting.
-        """
-        if self.trace is None or self.model is None:
-            raise RuntimeError("Fit the model before sampling posterior predictive.")
-
-        return pm.sample_posterior_predictive(self.trace, model=self.model)
     
     def plot_forecast(self, steps=10, credible_interval=0.9):
         if self.trace is None:
