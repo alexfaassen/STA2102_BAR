@@ -10,6 +10,11 @@ The project serves as both:
 - A self-study in Bayesian time series analysis (using `PyMC`), and
 - A toolbox to simplify Autoregressive model building, inference, and prediction using Bayesian methods.
 
+## Contents
+
+- **Module:** `bar.py` - all of the code is included here.
+- **Vignette:** `vignette.ipynb` - a guided example using synthetic AR(3) data.
+
 ## Reflection + A Note for the Professor
 
 Hi Professor,
