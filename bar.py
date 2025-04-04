@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 
 class BAR:
     """
-    Bayesian Autoregressive (BAR) model class using PyMC for MCMC inference.
+    Bayesian Autoregressive (BAR) model class using PyMC.
 
     This class models a univariate time series using a Bayesian AR(p) model,
     estimating posterior distributions over the AR coefficients and noise variance.
@@ -15,15 +15,15 @@ class BAR:
     p : int
         Order of the autoregressive model (i.e., number of lags).
     priors : dict, optional
-        Dictionary specifying custom priors for parameters:
-            - "phi_mu": mean of Normal prior for AR coefficients (default: 0)
-            - "phi_sigma": std dev of Normal prior for AR coefficients (default: 1)
-            - "sigma": std dev of HalfNormal prior for noise (default: 1)
+        Dictionary of prior specifications. Supports:
+            - "phi": a callable returning a PyMC distribution (takes `shape=p`)
+            - "sigma": a callable returning a PyMC distribution (takes no args)
+            - OR: scalars "phi_mu", "phi_sigma", "sigma" to use defaults
 
     Attributes
     ----------
     model : pm.Model
-        The PyMC model object used internally.
+        The PyMC model object.
     trace : arviz.InferenceData
         Posterior samples after fitting the model.
     y_fit : ndarray
@@ -56,14 +56,16 @@ class BAR:
         if not callable(priors.get("phi")):
             phi_mu = priors.get("phi_mu", 0)
             phi_sigma = priors.get("phi_sigma", 1)
-            priors["phi"] = lambda shape: pm.Normal.dist(mu=phi_mu, sigma=phi_sigma, shape=shape)
+            priors["phi"] = lambda shape: pm.Normal("phi", mu=phi_mu, sigma=phi_sigma, shape=shape)
 
         # Default sigma prior
         if not callable(priors.get("sigma")):
             sigma_scale = priors.get("sigma", 1)
-            priors["sigma"] = lambda: pm.HalfNormal.dist(sigma=sigma_scale)
+            priors["sigma"] = lambda: pm.HalfNormal("sigma", sigma=sigma_scale)
 
         self.priors = priors
+
+
 
     ## Time Series + Prior Visualization
     def plot_series(self):
@@ -83,42 +85,40 @@ class BAR:
         plt.show()
 
     def plot_priors(self, samples=1000):
-        """
-        Plot the prior distributions for the AR coefficients and sigma.
-
-        Parameters
-        ----------
-        samples : int
-            Number of samples to draw from the prior distributions.
-        """
-        phi_mu = self.priors.get("phi_mu", 0)
-        phi_sigma = self.priors.get("phi_sigma", 1)
-        sigma_scale = self.priors.get("sigma", 1)
-
         fig, axes = plt.subplots(1, self.p + 1, figsize=(4 * (self.p + 1), 4))
 
-        # AR coefficient priors
-        for i in range(self.p):
-            ax = axes[i]
-            phi_samples = np.random.normal(loc=phi_mu, scale=phi_sigma, size=samples)
-            ax.hist(phi_samples, bins=30, color="skyblue", edgecolor="gray", alpha=0.8)
-            ax.set_title(f"Prior for φ[{i + 1}]")
-            ax.set_xlabel("Value")
-            ax.set_ylabel("Density")
+        with pm.Model():
+            phi_rv = self.priors["phi"](shape=self.p)
+            sigma_rv = self.priors["sigma"]()
 
-        # Sigma prior
-        sigma_samples = np.abs(np.random.normal(loc=0, scale=sigma_scale, size=samples))
-        ax = axes[-1]
-        ax.hist(sigma_samples, bins=30, color="lightcoral", edgecolor="gray", alpha=0.8)
-        ax.set_title("Prior for σ")
-        ax.set_xlabel("Value")
-        ax.set_ylabel("Density")
+            # Rebind priors with unique names for plotting context
+            phi_temp = pm.Deterministic("phi_plot", phi_rv)
+            sigma_temp = pm.Deterministic("sigma_plot", sigma_rv)
+
+            prior_samples = pm.sample_prior_predictive(samples)
+
+        # Extract and plot samples
+        phi_samples = prior_samples.prior["phi_plot"].stack(sample=("chain", "draw")).values.T
+        sigma_samples = prior_samples.prior["sigma_plot"].stack(sample=("chain", "draw")).values
+
+        for i in range(self.p):
+            axes[i].hist(phi_samples[:, i], bins=30, color="skyblue", edgecolor="gray", alpha=0.8)
+            axes[i].set_title(f"Prior for φ[{i + 1}]")
+            axes[i].set_xlabel("Value")
+            axes[i].set_ylabel("Density")
+
+        axes[-1].hist(sigma_samples, bins=30, color="lightcoral", edgecolor="gray", alpha=0.8)
+        axes[-1].set_title("Prior for σ")
+        axes[-1].set_xlabel("Value")
+        axes[-1].set_ylabel("Density")
 
         plt.tight_layout()
         plt.show()
 
+
+
     ## Model fitting
-    def fit(self, y, draws=1000, tune=1000, target_accept=0.9, random_seed=42):
+    def fit(self, y, draws=1000, tune=1000, target_accept=0.9, random_seed=2102):
         """
         Fit the BAR(p) model to a univariate time series using MCMC.
 
@@ -133,23 +133,23 @@ class BAR:
         target_accept : float, optional
             Target acceptance rate for NUTS (default is 0.9).
         random_seed : int, optional
-            Random seed for reproducibility (default is 42).
+            Random seed for reproducibility (default is 2102).
         """
         y = np.asarray(y)
         if len(y) <= self.p:
             raise ValueError("Time series length must be greater than AR order p.")
         self.y_fit = y
 
-        # Create lagged feature matrix
+        # Create lagged feature matrix - i.e. y[t-1]; y[t-2]; ...
         X = np.column_stack([y[i:-(self.p - i)] for i in range(self.p)])
-        y_target = y[self.p:]
+        y_target = y[self.p:] # Reserve first p values for model fitting
 
         with pm.Model() as self.model:
             # Priors
-            phi = self.priors["phi"](shape=self.p)
+            phi = self.priors["phi"](shape=self.p) # p priors
             sigma = self.priors["sigma"]()
 
-            # Linear mean function
+            # Linear mean function - e.g. phi0 + phi1 * y[t-1] + ...
             mu = pm.math.dot(X, phi)
 
             # Likelihood
@@ -159,6 +159,8 @@ class BAR:
             self.trace = pm.sample(draws=draws, tune=tune,
                                    target_accept=target_accept,
                                    random_seed=random_seed)
+
+
 
     ## Model Summary + Diagnostics
     def summary(self):
@@ -186,6 +188,8 @@ class BAR:
         if self.trace is None:
             raise RuntimeError("Model must be fit before calling plot_trace().")
         return az.plot_trace(self.trace)
+
+
 
     ## Forecasting
     def forecast(self, steps=10, credible_interval=0.9):
