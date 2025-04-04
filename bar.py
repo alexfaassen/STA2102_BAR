@@ -1,100 +1,263 @@
 import numpy as np
+import pymc as pm
+import arviz as az
 import matplotlib.pyplot as plt
-import seaborn as sns
 
-class BayesianAR:
-    def __init__(self, p=1, prior_mean=None, prior_var=None, sigma2=1.0):
+class BAR:
+    """
+    Bayesian Autoregressive (BAR) model class using PyMC for MCMC inference.
+
+    This class models a univariate time series using a Bayesian AR(p) model,
+    estimating posterior distributions over the AR coefficients and noise variance.
+
+    Parameters
+    ----------
+    p : int
+        Order of the autoregressive model (i.e., number of lags).
+    priors : dict, optional
+        Dictionary specifying custom priors for parameters:
+            - "phi_mu": mean of Normal prior for AR coefficients (default: 0)
+            - "phi_sigma": std dev of Normal prior for AR coefficients (default: 1)
+            - "sigma": std dev of HalfNormal prior for noise (default: 1)
+
+    Attributes
+    ----------
+    model : pm.Model
+        The PyMC model object used internally.
+    trace : arviz.InferenceData
+        Posterior samples after fitting the model.
+    y_fit : ndarray
+        The original time series used during fitting.
+    """
+
+    ## Initialization
+    def __init__(self, p=1, priors=None):
         """
-        Bayesian Autoregressive (BAR) model.
+        Initialize the BAR model.
 
-        Parameters:
+        Parameters
+        ----------
         p : int
             Order of the autoregressive model.
-        prior_mean : np.array
-            Prior mean of AR parameters (size p).
-        prior_var : np.array
-            Prior covariance matrix of AR parameters (p x p).
-        sigma2 : float
-            Variance of the likelihood.
+        priors : dict, optional
+            Dictionary of prior specifications. Supports:
+                - "phi": a callable returning a PyMC distribution (takes `shape=p`)
+                - "sigma": a callable returning a PyMC distribution (takes no args)
+                - OR: scalar keys "phi_mu", "phi_sigma", "sigma" to use defaults
         """
         self.p = p
-        self.prior_mean = prior_mean if prior_mean is not None else np.zeros(p)
-        self.prior_var = prior_var if prior_var is not None else np.eye(p)
-        self.sigma2 = sigma2
-        self.posterior_mean = None
-        self.posterior_var = None
+        self.y_fit = None
+        self.model = None
+        self.trace = None
 
-    def fit(self, y):
+        priors = priors or {}
+
+        # Default phi prior
+        if not callable(priors.get("phi")):
+            phi_mu = priors.get("phi_mu", 0)
+            phi_sigma = priors.get("phi_sigma", 1)
+            priors["phi"] = lambda shape: pm.Normal.dist(mu=phi_mu, sigma=phi_sigma, shape=shape)
+
+        # Default sigma prior
+        if not callable(priors.get("sigma")):
+            sigma_scale = priors.get("sigma", 1)
+            priors["sigma"] = lambda: pm.HalfNormal.dist(sigma=sigma_scale)
+
+        self.priors = priors
+
+    ## Time Series + Prior Visualization
+    def plot_series(self):
         """
-        Fit the BAR model using Bayesian updating.
-
-        Parameters:
-        y : np.array
-            Time series data.
+        Plot the input time series used to fit the model.
         """
-        n = len(y)
-        X = np.column_stack([y[i:n - self.p + i] for i in range(self.p)])
-        y_target = y[self.p:]
-
-        V_inv = np.linalg.inv(self.prior_var) + (X.T @ X) / self.sigma2
-        V = np.linalg.inv(V_inv)
-        m = V @ (np.linalg.inv(self.prior_var) @ self.prior_mean + X.T @ y_target / self.sigma2)
-
-        self.posterior_mean = m
-        self.posterior_var = V
-
-    def forecast(self, y_last, steps=1):
-        """
-        Forecast future values using the posterior predictive distribution.
-
-        Parameters:
-        y_last : np.array
-            Most recent p values of the time series.
-        steps : int
-            Number of steps to forecast.
-
-        Returns:
-        forecasts : np.array
-            Forecasted values.
-        """
-        forecasts = []
-        y_current = y_last.copy()
-
-        for _ in range(steps):
-            pred_mean = self.posterior_mean @ y_current[::-1]
-            forecasts.append(pred_mean)
-
-            y_current = np.roll(y_current, -1)
-            y_current[-1] = pred_mean
-
-        return np.array(forecasts)
-
-    def plot_results(self, y, forecasts):
-        """
-        Plot the actual data and forecasts.
-
-        Parameters:
-        y : np.array
-            Original time series data.
-        forecasts : np.array
-            Forecasted values.
-        """
-        plt.figure(figsize=(10, 5))
-        plt.plot(y, label='Observed', marker='o')
-        forecast_range = np.arange(len(y), len(y) + len(forecasts))
-        plt.plot(forecast_range, forecasts, label='Forecast', marker='x', linestyle='--')
-        plt.xlabel('Time')
-        plt.ylabel('Value')
+        if self.y_fit is None:
+            raise RuntimeError("No data has been fit yet.")
+        
+        plt.figure(figsize=(10, 4))
+        plt.plot(self.y_fit, label="Input Time Series", color='black')
+        plt.xlabel("Time")
+        plt.ylabel("Value")
+        plt.title("Observed Time Series")
         plt.legend()
-        plt.title('Bayesian Autoregressive Model Forecast')
-        plt.grid()
+        plt.tight_layout()
         plt.show()
 
-# Example usage (to be placed in a separate test file or notebook):
-# if __name__ == '__main__':
-#     np.random.seed(0)
-#     data = np.sin(np.linspace(0, 10, 100)) + np.random.normal(scale=0.5, size=100)
-#     bar_model = BayesianAR(p=2)
-#     bar_model.fit(data)
-#     forecasts = bar_model.forecast(data[-2:], steps=10)
-#     bar_model.plot_results(data, forecasts)
+    def plot_priors(self, samples=1000):
+        """
+        Plot the prior distributions for the AR coefficients and sigma.
+
+        Parameters
+        ----------
+        samples : int
+            Number of samples to draw from the prior distributions.
+        """
+        phi_mu = self.priors.get("phi_mu", 0)
+        phi_sigma = self.priors.get("phi_sigma", 1)
+        sigma_scale = self.priors.get("sigma", 1)
+
+        fig, axes = plt.subplots(1, self.p + 1, figsize=(4 * (self.p + 1), 4))
+
+        # AR coefficient priors
+        for i in range(self.p):
+            ax = axes[i]
+            phi_samples = np.random.normal(loc=phi_mu, scale=phi_sigma, size=samples)
+            ax.hist(phi_samples, bins=30, color="skyblue", edgecolor="gray", alpha=0.8)
+            ax.set_title(f"Prior for φ[{i + 1}]")
+            ax.set_xlabel("Value")
+            ax.set_ylabel("Density")
+
+        # Sigma prior
+        sigma_samples = np.abs(np.random.normal(loc=0, scale=sigma_scale, size=samples))
+        ax = axes[-1]
+        ax.hist(sigma_samples, bins=30, color="lightcoral", edgecolor="gray", alpha=0.8)
+        ax.set_title("Prior for σ")
+        ax.set_xlabel("Value")
+        ax.set_ylabel("Density")
+
+        plt.tight_layout()
+        plt.show()
+
+    ## Model fitting
+    def fit(self, y, draws=1000, tune=1000, target_accept=0.9, random_seed=42):
+        """
+        Fit the BAR(p) model to a univariate time series using MCMC.
+
+        Parameters
+        ----------
+        y : array-like
+            Univariate time series of shape (n_timesteps,).
+        draws : int, optional
+            Number of MCMC samples to draw (default is 1000).
+        tune : int, optional
+            Number of tuning steps for NUTS sampler (default is 1000).
+        target_accept : float, optional
+            Target acceptance rate for NUTS (default is 0.9).
+        random_seed : int, optional
+            Random seed for reproducibility (default is 42).
+        """
+        y = np.asarray(y)
+        if len(y) <= self.p:
+            raise ValueError("Time series length must be greater than AR order p.")
+        self.y_fit = y
+
+        # Create lagged feature matrix
+        X = np.column_stack([y[i:-(self.p - i)] for i in range(self.p)])
+        y_target = y[self.p:]
+
+        with pm.Model() as self.model:
+            # Priors
+            phi = self.priors["phi"](shape=self.p)
+            sigma = self.priors["sigma"]()
+
+            # Linear mean function
+            mu = pm.math.dot(X, phi)
+
+            # Likelihood
+            y_obs = pm.Normal("y_obs", mu=mu, sigma=sigma, observed=y_target)
+
+            # Posterior sampling
+            self.trace = pm.sample(draws=draws, tune=tune,
+                                   target_accept=target_accept,
+                                   random_seed=random_seed)
+
+    ## Model Summary + Diagnostics
+    def summary(self):
+        """
+        Return summary statistics of posterior distributions.
+
+        Returns
+        -------
+        summary_df : pandas.DataFrame
+            Posterior summary from ArviZ.
+        """
+        if self.trace is None:
+            raise RuntimeError("Model must be fit before calling summary().")
+        return az.summary(self.trace)
+
+    def plot_trace(self):
+        """
+        Plot MCMC trace and posterior histograms for all parameters.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+            Trace plot figure object.
+        """
+        if self.trace is None:
+            raise RuntimeError("Model must be fit before calling plot_trace().")
+        return az.plot_trace(self.trace)
+
+    ## Forecasting
+    def forecast(self, steps=10, credible_interval=0.9):
+        """
+        Forecast future values from the model.
+
+        Parameters
+        ----------
+        steps : int
+            Number of future time steps to forecast.
+        credible_interval : float
+            Width of credible interval for uncertainty bands.
+
+        Returns
+        -------
+        forecast_mean : ndarray
+            Mean forecasted values.
+        lower : ndarray
+            Lower bound of the credible interval.
+        upper : ndarray
+            Upper bound of the credible interval.
+        forecasts : ndarray
+            All sampled forecast values (samples x steps).
+        """
+        if self.trace is None:
+            raise RuntimeError("Fit the model before forecasting.")
+
+        y_pred = np.asarray(self.y_fit).copy()
+        forecasts = []
+
+        for _ in range(steps):
+            X_new = y_pred[-self.p:][::-1]
+            samples = []
+            for phi_sample, sigma_sample in zip(
+                self.trace.posterior['phi'].stack(draws=("chain", "draw")).values.T,
+                self.trace.posterior['sigma'].stack(draws=("chain", "draw")).values.flatten()
+            ):
+                mu = np.dot(X_new, phi_sample)
+                samples.append(np.random.normal(mu, sigma_sample))
+            forecast_dist = np.array(samples)
+            y_pred = np.append(y_pred, np.mean(forecast_dist))
+            forecasts.append(forecast_dist)
+
+        forecasts = np.array(forecasts).T
+        forecast_mean = forecasts.mean(axis=0)
+        lower = np.percentile(forecasts, (1 - credible_interval) / 2 * 100, axis=0)
+        upper = np.percentile(forecasts, (1 + credible_interval) / 2 * 100, axis=0)
+
+        return forecast_mean, lower, upper, forecasts
+
+    def plot_forecast(self, steps=10, credible_interval=0.9):
+        """
+        Plot forecasted values and uncertainty bands.
+
+        Parameters
+        ----------
+        steps : int
+            Number of future time steps to forecast.
+        credible_interval : float
+            Width of credible interval for uncertainty bands.
+        """
+        forecast_mean, lower, upper, _ = self.forecast(steps, credible_interval)
+
+        n_obs = len(self.y_fit)
+        plt.figure(figsize=(10, 5))
+        plt.plot(np.arange(n_obs), self.y_fit, label="Observed", color='black')
+        plt.plot(np.arange(n_obs, n_obs + steps), forecast_mean, label="Forecast", color='blue')
+        plt.fill_between(np.arange(n_obs, n_obs + steps), lower, upper,
+                         color='blue', alpha=0.3, label=f"{int(credible_interval*100)}% CI")
+        plt.xlabel("Time")
+        plt.ylabel("Value")
+        plt.title(f"BAR({self.p}) Forecast")
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
